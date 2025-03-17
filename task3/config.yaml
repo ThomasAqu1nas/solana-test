@@ -1,0 +1,4 @@
+rpc_endpoint: "http://localhost:8899"
+recipient_address: "EPYEdVEp6Lwi93swyTwaivKArL92YJKWf3ASpFq4Qbmn"
+transfer_amount_sol: 0.01
+max_concurrent_transfers: 5
