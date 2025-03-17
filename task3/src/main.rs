@@ -44,28 +44,25 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("GEYSER_API_KEY")
         .expect("GEYSER_API_KEY not set in .env file");
 
-    // Load app configuration
     let config: AppConfig = Config::builder()
         .add_source(config::File::with_name("config.yaml"))
         .build()?
         .try_deserialize()?;
 
-    println!("✅ Config loaded successfully: {:?}", config);
+    println!("Config loaded successfully: {:?}", config);
 
-    // Setup TLS
     let pem = tokio::fs::read("server.pem").await?;
     let ca_cert = Certificate::from_pem(pem);
     let tls_config = ClientTlsConfig::new()
         .ca_certificate(ca_cert)
         .domain_name("grpc.ny.shyft.to");
 
-    // Connect to Geyser
+
     let endpoint = Endpoint::from_static("https://grpc.ny.shyft.to").tls_config(tls_config)?;
     let channel = endpoint.connect().await?;
     let interceptor = AuthInterceptor { api_key };
     let mut client = geyser::geyser_client::GeyserClient::with_interceptor(channel, interceptor);
 
-    // Setup subscribe request
     let mut subscribe_req = geyser::SubscribeRequest::default();
     subscribe_req.blocks.insert(
         "subscribe".to_string(),
@@ -77,7 +74,6 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Subscribed to Geyser stream. Waiting for blocks...");
 
-    // Setup concurrency limiter
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_transfers));
     let solana_rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
         config.rpc_endpoint.clone()
@@ -88,7 +84,6 @@ async fn main() -> anyhow::Result<()> {
         if let Some(geyser::subscribe_update::UpdateOneof::Block(block)) = update.update_oneof {
             println!("New block received, slot: {}", block.slot);
 
-            // Spawn transaction task
             let config = Arc::clone(&shared_config);
             let permit = Arc::clone(&semaphore).acquire_owned().await?;
             let connection = Arc::clone(&solana_rpc_client);
@@ -103,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(_) => println!("SOL transfer successful for slot {}", block.slot),
                         Err(e) => eprintln!("Failed SOL transfer for slot {}: {:?}", block.slot, e),
                     }
-                    drop(permit); // освобождаем семафор в конце задачи
+                    drop(permit);
                 })
                 .await;
             });
