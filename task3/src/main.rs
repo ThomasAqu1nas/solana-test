@@ -1,3 +1,25 @@
+/*
+Проблема:
+Error: Status { 
+    code: Unauthenticated, 
+    message: "client IP not whitelisted", 
+    metadata: MetadataMap { 
+        headers: {
+            "date": "Mon, 17 Mar 2025 16:30:07 GMT", 
+            "content-type": "application/grpc", 
+            "content-length": "0", 
+            "strict-transport-security": "max-age=31536000; 
+            includeSubDomains"
+        } 
+    }, 
+    source: None 
+}
+    получилось организовать хэндшейк с сервером, 
+    но моего айпи нет в вайтлисте, поэтому затестить
+    не представляется возможным
+*/
+
+
 mod solana;
 pub mod geyser {
     tonic::include_proto!("geyser");
