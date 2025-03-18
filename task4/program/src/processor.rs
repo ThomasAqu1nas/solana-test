@@ -127,13 +127,11 @@ impl Processor {
             return Err(ProgramError::IllegalOwner);
         }
     
-        // Формируем системную инструкцию перевода lamports
         let transfer_ix = solana_program::system_instruction::transfer(
             user_account_info.key,
             deposit_account_info.key,
             amount,
         );
-        // Передаем системную программу в качестве третьего аккаунта для CPI
         solana_program::program::invoke(
             &transfer_ix,
             &[

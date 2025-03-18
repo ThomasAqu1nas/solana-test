@@ -3,9 +3,7 @@ use solana_program_test::*;
 use solana_sdk::{
     account::Account, instruction::{AccountMeta, Instruction}, program_pack::Pack, rent::Rent, signature::{Keypair, Signer}, transaction::Transaction
 };
-use borsh::{BorshSerialize, BorshDeserialize};
 
-// Импортируем наши инструкции и состояние
 use program::instruction::DepositInstruction;
 use program::state::DepositAccount;
 
@@ -13,12 +11,11 @@ use program::state::DepositAccount;
 async fn test_initialize_deposit() {
     let program_id = Pubkey::new_unique();
     let mut program_test = ProgramTest::new(
-        "program", // имя вашего смарт-контракта
+        "program",
         program_id,
         processor!(program::entrypoint::process_instruction),
     );
 
-    // Создаем тестового пользователя
     let user = Keypair::new();
     program_test.add_account(
         user.pubkey(),
@@ -31,11 +28,9 @@ async fn test_initialize_deposit() {
         },
     );
 
-    // Вычисляем ожидаемый PDA для депозитного аккаунта: [b"deposit", user_pubkey]
     let (deposit_pda, _bump) =
         Pubkey::find_program_address(&[b"deposit", user.pubkey().as_ref()], &program_id);
 
-    // Формируем инструкцию инициализации
     let init_ix = Instruction {
         program_id,
         accounts: vec![
@@ -47,7 +42,7 @@ async fn test_initialize_deposit() {
         data: DepositInstruction::Initialize.pack(),
     };
 
-    let (mut banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
     let tx = Transaction::new_signed_with_payer(
         &[init_ix],
         Some(&user.pubkey()),
@@ -57,7 +52,6 @@ async fn test_initialize_deposit() {
 
     banks_client.process_transaction(tx).await.unwrap();
 
-    // Загружаем состояние депозитного аккаунта и десериализуем с помощью Pack
     let deposit_account = banks_client
         .get_account(deposit_pda)
         .await
@@ -115,7 +109,6 @@ async fn test_deposit() {
         },
     );
 
-    // Формируем инструкцию депозита: перевод 500 lamports
     let deposit_amount = 500;
     let deposit_ix = Instruction {
         program_id,
@@ -128,7 +121,7 @@ async fn test_deposit() {
     };
     
 
-    let (mut banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
     let tx = Transaction::new_signed_with_payer(
         &[deposit_ix],
         Some(&user.pubkey()),
@@ -137,7 +130,6 @@ async fn test_deposit() {
     );
     banks_client.process_transaction(tx).await.unwrap();
 
-    // Читаем и десериализуем состояние аккаунта с помощью unpack_from_slice
     let deposit_account = banks_client
         .get_account(deposit_pda)
         .await
@@ -201,7 +193,7 @@ async fn test_withdraw() {
         data: DepositInstruction::Withdraw { amount: withdraw_amount }.pack(),
     };
 
-    let (mut banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
     let tx = Transaction::new_signed_with_payer(
         &[withdraw_ix],
         Some(&user.pubkey()),
