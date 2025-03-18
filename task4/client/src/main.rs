@@ -1,15 +1,16 @@
+use std::str::FromStr;
+
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
+    system_program,
     transaction::Transaction,
-    system_instruction,
 };
+
 use program::instruction::DepositInstruction;
-use borsh::BorshSerialize;
-use std::str::FromStr;
 
 fn main() {
     let rpc_url = "http://localhost:8899";
@@ -21,60 +22,59 @@ fn main() {
         249, 24, 193, 207, 28, 190, 197, 31, 72, 216, 147, 0, 154, 43, 158, 17, 148,
         199, 33, 243, 87, 203, 80, 150, 36, 168, 27, 249, 178, 253
     ]).expect("Не удалось импортировать ключ");
-
     println!("Payer: {}", payer.pubkey());
 
-    let airdrop_sig = client.request_airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
-    client.confirm_transaction(&airdrop_sig).unwrap();
+    // Запрашиваем аирдроп для аккаунта payer, если его баланс равен 0
+    let balance = client.get_balance(&payer.pubkey()).unwrap();
+    if balance == 0 {
+        let airdrop_amount = 1_000_000_000; // 1 SOL = 1_000_000_000 lamports
+        let signature = client.request_airdrop(&payer.pubkey(), airdrop_amount).unwrap();
+        client.confirm_transaction(&signature).unwrap();
+        println!("Получен аирдроп: {} lamports", airdrop_amount);
+    }
 
     let program_id = Pubkey::from_str("F1N6jUWGC1VYYUArJXcE9w1rrshJZusrrpnDsTiHeLLD").unwrap();
 
-    // 1. Создание аккаунта депозита с дополнительными средствами.
-    let deposit_account_key = Keypair::new();
-    let deposit_account_pubkey = deposit_account_key.pubkey();
-    let deposit_account_size = 8;
+    let (deposit_pda, _bump) = Pubkey::find_program_address(&[b"deposit", payer.pubkey().as_ref()], &program_id);
+    println!("Deposit PDA: {}", deposit_pda);
 
-    let rent_exemption = client
-        .get_minimum_balance_for_rent_exemption(deposit_account_size)
-        .expect("Не удалось получить минимальный баланс для арендной платы");
+    if client.get_account(&deposit_pda).is_err() {
+        let init_instruction = DepositInstruction::Initialize;
+        let init_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(deposit_pda, false),
+                AccountMeta::new(payer.pubkey(), true),
+                AccountMeta::new_readonly(system_program::ID, false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            ],
+            data: init_instruction.pack(),
+        };
 
-    let deposit_amount = 500u64;
-    let total_funding = rent_exemption + deposit_amount;
+        let recent_blockhash = client.get_latest_blockhash().unwrap();
+        let init_tx = Transaction::new_signed_with_payer(
+            &[init_ix],
+            Some(&payer.pubkey()),
+            &[&payer],
+            recent_blockhash,
+        );
+        let init_result = client.send_and_confirm_transaction(&init_tx);
+        println!("Initialize deposit account result: {:?}", init_result);
+    } else {
+        println!("Deposit account уже существует.");
+    }
 
-    let create_account_ix = system_instruction::create_account(
-        &payer.pubkey(),
-        &deposit_account_pubkey,
-        total_funding,
-        deposit_account_size as u64,
-        &program_id,
-    );
-
-    let recent_blockhash = client.get_latest_blockhash().unwrap();
-    let create_account_tx = Transaction::new_signed_with_payer(
-        &[create_account_ix],
-        Some(&payer.pubkey()),
-        &[&payer, &deposit_account_key],
-        recent_blockhash,
-    );
-    let create_account_result = client.send_and_confirm_transaction(&create_account_tx);
-    println!("Create deposit account result: {:?}", create_account_result);
-
-    // 2. Выполнение инструкции депозита 
+    let deposit_amount: u64 = 500;
     let deposit_instruction = DepositInstruction::Deposit { amount: deposit_amount };
-    let mut deposit_ix_data = vec![];
-    deposit_instruction
-        .serialize(&mut deposit_ix_data)
-        .expect("Не удалось сериализовать инструкцию депозита");
-
     let deposit_ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new(deposit_account_pubkey, false),
+            AccountMeta::new(deposit_pda, false),
             AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(system_program::ID, false), // системная программа для CPI
         ],
-        data: deposit_ix_data,
+        data: deposit_instruction.pack(),
     };
-
     let recent_blockhash = client.get_latest_blockhash().unwrap();
     let deposit_tx = Transaction::new_signed_with_payer(
         &[deposit_ix],
@@ -85,23 +85,16 @@ fn main() {
     let deposit_result = client.send_and_confirm_transaction(&deposit_tx);
     println!("Deposit result: {:?}", deposit_result);
 
-    // 3. Вывод средств.
-    let withdraw_amount = 200u64;
+    let withdraw_amount: u64 = 200;
     let withdraw_instruction = DepositInstruction::Withdraw { amount: withdraw_amount };
-    let mut withdraw_ix_data = vec![];
-    withdraw_instruction
-        .serialize(&mut withdraw_ix_data)
-        .expect("Не удалось сериализовать инструкцию вывода");
-
     let withdraw_ix = Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new(deposit_account_pubkey, false),
+            AccountMeta::new(deposit_pda, false),
             AccountMeta::new(payer.pubkey(), true),
         ],
-        data: withdraw_ix_data,
+        data: withdraw_instruction.pack(),
     };
-
     let recent_blockhash = client.get_latest_blockhash().unwrap();
     let withdraw_tx = Transaction::new_signed_with_payer(
         &[withdraw_ix],
