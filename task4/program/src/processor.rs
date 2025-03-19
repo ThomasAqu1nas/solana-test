@@ -6,12 +6,11 @@ use solana_program::{
     pubkey::Pubkey,
     rent::Rent,
     sysvar::Sysvar,
-    program_pack::Pack
+    program_pack::Pack,
 };
 
 use crate::instruction::DepositInstruction;
 use crate::state::DepositAccount;
-use borsh::{BorshDeserialize, BorshSerialize};
 
 pub struct Processor;
 impl Processor {
@@ -27,7 +26,7 @@ impl Processor {
             }
             DepositInstruction::Withdraw { amount } => {
                 Self::process_withdraw(program_id, accounts, amount)
-            },
+            }
             DepositInstruction::Initialize => {
                 Self::process_initialize(program_id, accounts)
             }
@@ -53,7 +52,7 @@ impl Processor {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        // Если аккаунт уже инициализирован - ошибка
+        // Если аккаунт уже инициализирован – ошибка
         if !deposit_account_info.data_is_empty() {
             msg!("Депозитный аккаунт уже инициализирован");
             return Err(ProgramError::AccountAlreadyInitialized);
@@ -63,8 +62,8 @@ impl Processor {
         let required_lamports = rent.minimum_balance(DepositAccount::LEN);
 
         let create_account_ix = solana_program::system_instruction::create_account(
-            user_account_info.key,              // плательщик
-            deposit_account_info.key,           // новый аккаунт
+            user_account_info.key,    // плательщик
+            deposit_account_info.key, // новый аккаунт
             required_lamports,
             DepositAccount::LEN as u64,
             program_id,
@@ -85,7 +84,8 @@ impl Processor {
             owner: *user_account_info.key,
             balance: 0,
         };
-        deposit_state.serialize(&mut &mut deposit_account_info.data.borrow_mut()[..])?;
+        // Используем Pack для записи данных в аккаунт
+        deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
         msg!("Депозитный аккаунт инициализирован для {}", user_account_info.key);
         Ok(())
     }
@@ -102,7 +102,7 @@ impl Processor {
         let user_account_info = next_account_info(account_info_iter)?;
         // Получаем аккаунт системной программы
         let system_program_info = next_account_info(account_info_iter)?;
-    
+
         if !user_account_info.is_signer {
             msg!("Подпись пользователя обязательна");
             return Err(ProgramError::MissingRequiredSignature);
@@ -111,7 +111,7 @@ impl Processor {
             msg!("Неверный владелец депозитного аккаунта");
             return Err(ProgramError::IncorrectProgramId);
         }
-    
+
         let (expected_deposit_pda, _bump) = Pubkey::find_program_address(
             &[b"deposit", user_account_info.key.as_ref()],
             program_id,
@@ -120,13 +120,13 @@ impl Processor {
             msg!("Депозитный аккаунт не соответствует ожидаемому PDA");
             return Err(ProgramError::InvalidAccountData);
         }
-    
+
         let mut deposit_state = DepositAccount::unpack_from_slice(&deposit_account_info.data.borrow())?;
         if deposit_state.owner != *user_account_info.key {
             msg!("Пользователь не является владельцем депозитного аккаунта");
             return Err(ProgramError::IllegalOwner);
         }
-    
+
         let transfer_ix = solana_program::system_instruction::transfer(
             user_account_info.key,
             deposit_account_info.key,
@@ -140,17 +140,16 @@ impl Processor {
                 system_program_info.clone(),
             ],
         )?;
-    
+
         deposit_state.balance = deposit_state
             .balance
             .checked_add(amount)
             .ok_or(ProgramError::InvalidInstructionData)?;
-    
+
         deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
         msg!("Депозит {} lamports успешен. Новый баланс: {}", amount, deposit_state.balance);
         Ok(())
     }
-    
 
     /// 0. [Writable] Депозитный аккаунт (PDA)
     /// 1. [Signer, Writable] Счёт получателя (должен совпадать с owner депозитного аккаунта)
@@ -172,7 +171,7 @@ impl Processor {
             return Err(ProgramError::IncorrectProgramId);
         }
 
-        let mut deposit_state = DepositAccount::try_from_slice(&deposit_account_info.data.borrow())?;
+        let mut deposit_state = DepositAccount::unpack_from_slice(&deposit_account_info.data.borrow())?;
         if deposit_state.owner != *destination_account_info.key {
             msg!("Только владелец депозитного аккаунта может выводить средства");
             return Err(ProgramError::IllegalOwner);
@@ -183,7 +182,7 @@ impl Processor {
         }
 
         deposit_state.balance -= amount;
-        deposit_state.serialize(&mut &mut deposit_account_info.data.borrow_mut()[..])?;
+        deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
 
         let deposit_lamports = **deposit_account_info.try_borrow_mut_lamports()?;
         if deposit_lamports < amount {

@@ -1,6 +1,5 @@
-use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::program_error::ProgramError;
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
+#[derive(Debug)]
 pub enum DepositInstruction {
     Deposit { amount: u64 },
     Withdraw { amount: u64 },

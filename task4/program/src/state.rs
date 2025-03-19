@@ -1,10 +1,9 @@
-use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::program_pack::{Pack, Sealed};
 use solana_program::program_error::ProgramError;
 use solana_program::pubkey::Pubkey;
 
 #[repr(C)]
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
+#[derive(Debug)]
 pub struct DepositAccount {
     pub owner: Pubkey,
     pub balance: u64,
