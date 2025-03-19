@@ -100,7 +100,6 @@ impl Processor {
         let account_info_iter = &mut accounts.iter();
         let deposit_account_info = next_account_info(account_info_iter)?;
         let user_account_info = next_account_info(account_info_iter)?;
-        // Получаем аккаунт системной программы
         let system_program_info = next_account_info(account_info_iter)?;
 
         if !user_account_info.is_signer {

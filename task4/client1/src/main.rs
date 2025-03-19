@@ -10,7 +10,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
-use program::instruction::DepositInstruction;
+use program1::instruction::DepositInstruction;
 
 fn main() {
     let rpc_url = "http://localhost:8899";

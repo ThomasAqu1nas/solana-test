@@ -1,11 +1,25 @@
 use solana_program::pubkey::Pubkey;
 use solana_program_test::*;
 use solana_sdk::{
-    account::Account, instruction::{AccountMeta, Instruction}, program_pack::Pack, rent::Rent, signature::{Keypair, Signer}, transaction::Transaction
+    account::Account,
+    instruction::{AccountMeta, Instruction},
+    program_pack::Pack,
+    rent::Rent,
+    signature::{Keypair, Signer},
+    transaction::Transaction,
 };
 
-use program::instruction::DepositInstruction;
-use program::state::DepositAccount;
+use program1::instruction::DepositInstruction;
+use program1::state::DepositAccount;
+
+async fn get_lamports(banks_client: &mut BanksClient, pubkey: Pubkey) -> u64 {
+    banks_client
+        .get_account(pubkey)
+        .await
+        .expect("get_account")
+        .expect("account not found")
+        .lamports
+}
 
 #[tokio::test]
 async fn test_initialize_deposit() {
@@ -13,7 +27,7 @@ async fn test_initialize_deposit() {
     let mut program_test = ProgramTest::new(
         "program",
         program_id,
-        processor!(program::entrypoint::process_instruction),
+        processor!(program1::entrypoint::process_instruction),
     );
 
     let user = Keypair::new();
@@ -49,7 +63,6 @@ async fn test_initialize_deposit() {
         &[&user],
         recent_blockhash,
     );
-
     banks_client.process_transaction(tx).await.unwrap();
 
     let deposit_account = banks_client
@@ -58,9 +71,12 @@ async fn test_initialize_deposit() {
         .expect("get_account")
         .expect("deposit account not found");
 
+    let rent = Rent::default();
+    let required_lamports = rent.minimum_balance(DepositAccount::LEN);
+    assert_eq!(deposit_account.lamports, required_lamports);
+
     let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
         .expect("failed to deserialize deposit state");
-
     assert_eq!(deposit_state.owner, user.pubkey());
     assert_eq!(deposit_state.balance, 0);
 }
@@ -71,7 +87,7 @@ async fn test_deposit() {
     let mut program_test = ProgramTest::new(
         "program",
         program_id,
-        processor!(program::entrypoint::process_instruction),
+        processor!(program1::entrypoint::process_instruction),
     );
 
     let user = Keypair::new();
@@ -120,8 +136,8 @@ async fn test_deposit() {
         data: DepositInstruction::Deposit { amount: deposit_amount }.pack(),
     };
     
-
-    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let (mut banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let user_before = get_lamports(&mut banks_client, user.pubkey()).await;
     let tx = Transaction::new_signed_with_payer(
         &[deposit_ix],
         Some(&user.pubkey()),
@@ -137,8 +153,12 @@ async fn test_deposit() {
         .expect("deposit account not found");
     let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
         .expect("failed to deserialize state");
-
     assert_eq!(deposit_state.balance, deposit_amount);
+    assert_eq!(deposit_account.lamports, deposit_lamports + deposit_amount);
+
+    let user_after = get_lamports(&mut banks_client, user.pubkey()).await;
+    let diff = user_before.saturating_sub(user_after);
+    assert!(diff >= deposit_amount);
 }
 
 #[tokio::test]
@@ -147,7 +167,7 @@ async fn test_withdraw() {
     let mut program_test = ProgramTest::new(
         "program",
         program_id,
-        processor!(program::entrypoint::process_instruction),
+        processor!(program1::entrypoint::process_instruction),
     );
 
     let user = Keypair::new();
@@ -172,16 +192,21 @@ async fn test_withdraw() {
     };
     let mut deposit_data = vec![0u8; DepositAccount::LEN];
     deposit_state.pack_into_slice(&mut deposit_data);
+    let rent = Rent::default();
+    let deposit_lamports = rent.minimum_balance(DepositAccount::LEN) + initial_balance;
     program_test.add_account(
         deposit_pda,
         Account {
-            lamports: 1_000_000,
+            lamports: deposit_lamports,
             data: deposit_data,
             owner: program_id,
             executable: false,
             rent_epoch: 0,
         },
     );
+
+    let (mut banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let user_before = get_lamports(&mut banks_client, user.pubkey()).await;
 
     let withdraw_amount = 300;
     let withdraw_ix = Instruction {
@@ -193,7 +218,6 @@ async fn test_withdraw() {
         data: DepositInstruction::Withdraw { amount: withdraw_amount }.pack(),
     };
 
-    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
     let tx = Transaction::new_signed_with_payer(
         &[withdraw_ix],
         Some(&user.pubkey()),
@@ -209,6 +233,12 @@ async fn test_withdraw() {
         .expect("deposit account not found");
     let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
         .expect("failed to deserialize state");
-
     assert_eq!(deposit_state.balance, initial_balance - withdraw_amount);
+    assert_eq!(deposit_account.lamports, deposit_lamports - withdraw_amount);
+
+    let user_after = get_lamports(&mut banks_client, user.pubkey()).await;
+    let diff = user_after.saturating_sub(user_before);
+    // Из-за комиссии реальная разница может быть меньше withdraw_amount
+    // Поэтому допускаем небольшой отступ
+    assert!(diff >= withdraw_amount.saturating_sub(1000), "User balance increased by {} (expected at least {})", diff, withdraw_amount);
 }

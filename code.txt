@@ -1,0 +1,531 @@
+я тебе скину текущую реализацию, ты внимательно все обработаешь и запомнишь. На основании "старой" реализации  нужно будет сделать новую, где все переводы лампортов будут призведены через системную инструкцию.
+Аккаунты депозиты будут также вычисляться на основе публичного ключа "формального владельца" - обычного пользователя.
+При выводе будет проверяться, что именно этот пользователь может выводить столько средств с такого депозитного аккаунта.
+Также описать функцию депозита и инициализации депозитного аккаунта. Но как я понял, в новой реализации модуль state.rs будет не нужен, так как новый депозитный аккаунт не должен иметь возможности хранить данные (исправь меня, если я не прав)
+Вот старая реализация:
+entrypoint.rs:
+use solana_program::{
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, pubkey::Pubkey,
+};
+
+use crate::processor::Processor;
+
+entrypoint!(process_instruction);
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    Processor::process_instruction(program_id, accounts, instruction_data)
+}
+
+instruction.rs:
+use solana_program::program_error::ProgramError;
+#[derive(Debug)]
+pub enum DepositInstruction {
+    Deposit { amount: u64 },
+    Withdraw { amount: u64 },
+    Initialize,
+}
+
+impl DepositInstruction {
+    pub fn pack(&self) -> Vec<u8> {
+        match self {
+            DepositInstruction::Deposit { amount } => {
+                let mut buf = vec![0];
+                buf.extend_from_slice(&amount.to_le_bytes());
+                buf
+            },
+            DepositInstruction::Withdraw { amount } => {
+                let mut buf = vec![1];
+                buf.extend_from_slice(&amount.to_le_bytes());
+                buf
+            },
+            DepositInstruction::Initialize => vec![2]
+        }
+    }
+
+    pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        let (tag, rest) = data.split_at(1);
+        match tag[0] {
+            0 => {
+                let amount = u64::from_le_bytes(
+                    rest.try_into().map_err(|_| ProgramError::InvalidInstructionData)?
+                );
+                Ok(DepositInstruction::Deposit { amount })
+            },
+            1 => {
+                let amount = u64::from_le_bytes(
+                    rest.try_into().map_err(|_| ProgramError::InvalidInstructionData)?
+                );
+                Ok(DepositInstruction::Withdraw { amount })
+            },
+            2 => Ok(DepositInstruction::Initialize),
+            _ => Err(ProgramError::InvalidInstructionData),
+        }
+    }
+}
+lib.rs:
+pub mod processor;
+pub mod state;
+pub mod instruction;
+pub mod entrypoint;
+
+processor.rs:
+use solana_program::{
+    account_info::{next_account_info, AccountInfo},
+    entrypoint::ProgramResult,
+    msg,
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    rent::Rent,
+    sysvar::Sysvar,
+    program_pack::Pack,
+};
+
+use crate::instruction::DepositInstruction;
+use crate::state::DepositAccount;
+
+pub struct Processor;
+impl Processor {
+    pub fn process_instruction(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        instruction_data: &[u8],
+    ) -> ProgramResult {
+        let instruction = DepositInstruction::unpack(instruction_data)?;
+        match instruction {
+            DepositInstruction::Deposit { amount } => {
+                Self::process_deposit(program_id, accounts, amount)
+            }
+            DepositInstruction::Withdraw { amount } => {
+                Self::process_withdraw(program_id, accounts, amount)
+            }
+            DepositInstruction::Initialize => {
+                Self::process_initialize(program_id, accounts)
+            }
+        }
+    }
+
+    fn process_initialize(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let deposit_account_info = next_account_info(account_info_iter)?;
+        let user_account_info = next_account_info(account_info_iter)?;
+        let system_program_info = next_account_info(account_info_iter)?;
+        let rent_sysvar_info = next_account_info(account_info_iter)?;
+
+        let (expected_deposit_pda, bump) = Pubkey::find_program_address(
+            &[b"deposit", user_account_info.key.as_ref()],
+            program_id,
+        );
+        if expected_deposit_pda != *deposit_account_info.key {
+            msg!("Неверный адрес депозитного аккаунта");
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        // Если аккаунт уже инициализирован – ошибка
+        if !deposit_account_info.data_is_empty() {
+            msg!("Депозитный аккаунт уже инициализирован");
+            return Err(ProgramError::AccountAlreadyInitialized);
+        }
+
+        let rent = Rent::from_account_info(rent_sysvar_info)?;
+        let required_lamports = rent.minimum_balance(DepositAccount::LEN);
+
+        let create_account_ix = solana_program::system_instruction::create_account(
+            user_account_info.key,    // плательщик
+            deposit_account_info.key, // новый аккаунт
+            required_lamports,
+            DepositAccount::LEN as u64,
+            program_id,
+        );
+
+        let seeds = &[b"deposit", user_account_info.key.as_ref(), &[bump]];
+        solana_program::program::invoke_signed(
+            &create_account_ix,
+            &[
+                user_account_info.clone(),
+                deposit_account_info.clone(),
+                system_program_info.clone(),
+            ],
+            &[seeds],
+        )?;
+
+        let deposit_state = DepositAccount {
+            owner: *user_account_info.key,
+            balance: 0,
+        };
+        // Используем Pack для записи данных в аккаунт
+        deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
+        msg!("Депозитный аккаунт инициализирован для {}", user_account_info.key);
+        Ok(())
+    }
+
+    /// 0. [Writable] Депозитный аккаунт (PDA)
+    /// 1. [Signer, Writable] Пользователь (owner)
+    fn process_deposit(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        amount: u64,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let deposit_account_info = next_account_info(account_info_iter)?;
+        let user_account_info = next_account_info(account_info_iter)?;
+        // Получаем аккаунт системной программы
+        let system_program_info = next_account_info(account_info_iter)?;
+
+        if !user_account_info.is_signer {
+            msg!("Подпись пользователя обязательна");
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        if deposit_account_info.owner != program_id {
+            msg!("Неверный владелец депозитного аккаунта");
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
+        let (expected_deposit_pda, _bump) = Pubkey::find_program_address(
+            &[b"deposit", user_account_info.key.as_ref()],
+            program_id,
+        );
+        if expected_deposit_pda != *deposit_account_info.key {
+            msg!("Депозитный аккаунт не соответствует ожидаемому PDA");
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        let mut deposit_state = DepositAccount::unpack_from_slice(&deposit_account_info.data.borrow())?;
+        if deposit_state.owner != *user_account_info.key {
+            msg!("Пользователь не является владельцем депозитного аккаунта");
+            return Err(ProgramError::IllegalOwner);
+        }
+
+        let transfer_ix = solana_program::system_instruction::transfer(
+            user_account_info.key,
+            deposit_account_info.key,
+            amount,
+        );
+        solana_program::program::invoke(
+            &transfer_ix,
+            &[
+                user_account_info.clone(),
+                deposit_account_info.clone(),
+                system_program_info.clone(),
+            ],
+        )?;
+
+        deposit_state.balance = deposit_state
+            .balance
+            .checked_add(amount)
+            .ok_or(ProgramError::InvalidInstructionData)?;
+
+        deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
+        msg!("Депозит {} lamports успешен. Новый баланс: {}", amount, deposit_state.balance);
+        Ok(())
+    }
+
+    /// 0. [Writable] Депозитный аккаунт (PDA)
+    /// 1. [Signer, Writable] Счёт получателя (должен совпадать с owner депозитного аккаунта)
+    fn process_withdraw(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        amount: u64,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let deposit_account_info = next_account_info(account_info_iter)?;
+        let destination_account_info = next_account_info(account_info_iter)?;
+
+        if !destination_account_info.is_signer {
+            msg!("Подпись получателя обязательна");
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        if deposit_account_info.owner != program_id {
+            msg!("Неверный владелец депозитного аккаунта");
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
+        let mut deposit_state = DepositAccount::unpack_from_slice(&deposit_account_info.data.borrow())?;
+        if deposit_state.owner != *destination_account_info.key {
+            msg!("Только владелец депозитного аккаунта может выводить средства");
+            return Err(ProgramError::IllegalOwner);
+        }
+        if deposit_state.balance < amount {
+            msg!("Недостаточный баланс в депозитном аккаунте");
+            return Err(ProgramError::InsufficientFunds);
+        }
+
+        deposit_state.balance -= amount;
+        deposit_state.pack_into_slice(&mut deposit_account_info.data.borrow_mut());
+
+        let deposit_lamports = **deposit_account_info.try_borrow_mut_lamports()?;
+        if deposit_lamports < amount {
+            msg!("Фактический баланс lamports меньше требуемой суммы");
+            return Err(ProgramError::InsufficientFunds);
+        }
+        **deposit_account_info.try_borrow_mut_lamports()? -= amount;
+        **destination_account_info.try_borrow_mut_lamports()? += amount;
+        msg!("Вывод {} lamports успешен. Новый баланс: {}", amount, deposit_state.balance);
+        Ok(())
+    }
+}
+
+state.rs:
+use solana_program::program_pack::{Pack, Sealed};
+use solana_program::program_error::ProgramError;
+use solana_program::pubkey::Pubkey;
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct DepositAccount {
+    pub owner: Pubkey,
+    pub balance: u64,
+}
+
+impl Sealed for DepositAccount {}
+
+impl Pack for DepositAccount {
+    const LEN: usize = 40;
+
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        let dst = arrayref::array_mut_ref![dst, 0, 40];
+        let DepositAccount {
+            owner, 
+            balance
+        } = self;
+        let (
+            owner_dst, balance_dst
+        ) = arrayref::mut_array_refs![dst, 32, 8];
+        owner_dst.copy_from_slice(owner.as_array());
+        balance_dst.copy_from_slice(&balance.to_le_bytes());
+    }
+
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
+        let src = arrayref::array_ref![src, 0, 40];
+        let (owner, balance) = arrayref::array_refs![src, 32, 8];
+        let (owner, balance) = (
+            Pubkey::new_from_array(*owner),
+            u64::from_le_bytes(*balance),
+        );
+
+        Ok(Self { 
+            owner, balance
+        })
+    }
+}
+
+integration_tests.rs:
+use solana_program::pubkey::Pubkey;
+use solana_program_test::*;
+use solana_sdk::{
+    account::Account, instruction::{AccountMeta, Instruction}, program_pack::Pack, rent::Rent, signature::{Keypair, Signer}, transaction::Transaction
+};
+
+use program::instruction::DepositInstruction;
+use program::state::DepositAccount;
+
+#[tokio::test]
+async fn test_initialize_deposit() {
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "program",
+        program_id,
+        processor!(program::entrypoint::process_instruction),
+    );
+
+    let user = Keypair::new();
+    program_test.add_account(
+        user.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![],
+            owner: solana_program::system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (deposit_pda, _bump) =
+        Pubkey::find_program_address(&[b"deposit", user.pubkey().as_ref()], &program_id);
+
+    let init_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(deposit_pda, false),
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+            AccountMeta::new_readonly(solana_program::sysvar::rent::id(), false),
+        ],
+        data: DepositInstruction::Initialize.pack(),
+    };
+
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let tx = Transaction::new_signed_with_payer(
+        &[init_ix],
+        Some(&user.pubkey()),
+        &[&user],
+        recent_blockhash,
+    );
+
+    banks_client.process_transaction(tx).await.unwrap();
+
+    let deposit_account = banks_client
+        .get_account(deposit_pda)
+        .await
+        .expect("get_account")
+        .expect("deposit account not found");
+
+    let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
+        .expect("failed to deserialize deposit state");
+
+    assert_eq!(deposit_state.owner, user.pubkey());
+    assert_eq!(deposit_state.balance, 0);
+}
+
+#[tokio::test]
+async fn test_deposit() {
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "program",
+        program_id,
+        processor!(program::entrypoint::process_instruction),
+    );
+
+    let user = Keypair::new();
+    program_test.add_account(
+        user.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![],
+            owner: solana_program::system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (deposit_pda, _bump) =
+        Pubkey::find_program_address(&[b"deposit", user.pubkey().as_ref()], &program_id);
+
+    let init_state = DepositAccount {
+        owner: user.pubkey(),
+        balance: 0,
+    };
+    let mut deposit_data = vec![0u8; DepositAccount::LEN];
+    init_state.pack_into_slice(&mut deposit_data);
+    let rent = Rent::default();
+    let deposit_lamports = rent.minimum_balance(DepositAccount::LEN);
+    
+    program_test.add_account(
+        deposit_pda,
+        Account {
+            lamports: deposit_lamports,
+            data: deposit_data,
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let deposit_amount = 500;
+    let deposit_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(deposit_pda, false),
+            AccountMeta::new(user.pubkey(), true),
+            AccountMeta::new_readonly(solana_program::system_program::ID, false),
+        ],
+        data: DepositInstruction::Deposit { amount: deposit_amount }.pack(),
+    };
+    
+
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let tx = Transaction::new_signed_with_payer(
+        &[deposit_ix],
+        Some(&user.pubkey()),
+        &[&user],
+        recent_blockhash,
+    );
+    banks_client.process_transaction(tx).await.unwrap();
+
+    let deposit_account = banks_client
+        .get_account(deposit_pda)
+        .await
+        .expect("get_account")
+        .expect("deposit account not found");
+    let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
+        .expect("failed to deserialize state");
+
+    assert_eq!(deposit_state.balance, deposit_amount);
+}
+
+#[tokio::test]
+async fn test_withdraw() {
+    let program_id = Pubkey::new_unique();
+    let mut program_test = ProgramTest::new(
+        "program",
+        program_id,
+        processor!(program::entrypoint::process_instruction),
+    );
+
+    let user = Keypair::new();
+    program_test.add_account(
+        user.pubkey(),
+        Account {
+            lamports: 10_000_000,
+            data: vec![],
+            owner: solana_program::system_program::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let (deposit_pda, _bump) =
+        Pubkey::find_program_address(&[b"deposit", user.pubkey().as_ref()], &program_id);
+
+    let initial_balance = 500;
+    let deposit_state = DepositAccount {
+        owner: user.pubkey(),
+        balance: initial_balance,
+    };
+    let mut deposit_data = vec![0u8; DepositAccount::LEN];
+    deposit_state.pack_into_slice(&mut deposit_data);
+    program_test.add_account(
+        deposit_pda,
+        Account {
+            lamports: 1_000_000,
+            data: deposit_data,
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+
+    let withdraw_amount = 300;
+    let withdraw_ix = Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new(deposit_pda, false),
+            AccountMeta::new(user.pubkey(), true),
+        ],
+        data: DepositInstruction::Withdraw { amount: withdraw_amount }.pack(),
+    };
+
+    let (banks_client, _payer, recent_blockhash) = program_test.start().await;
+    let tx = Transaction::new_signed_with_payer(
+        &[withdraw_ix],
+        Some(&user.pubkey()),
+        &[&user],
+        recent_blockhash,
+    );
+    banks_client.process_transaction(tx).await.unwrap();
+
+    let deposit_account = banks_client
+        .get_account(deposit_pda)
+        .await
+        .expect("get_account")
+        .expect("deposit account not found");
+    let deposit_state = DepositAccount::unpack_from_slice(&deposit_account.data)
+        .expect("failed to deserialize state");
+
+    assert_eq!(deposit_state.balance, initial_balance - withdraw_amount);
+}

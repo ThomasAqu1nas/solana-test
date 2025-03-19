@@ -1,5 +1,5 @@
 [package]
-name = "client"
+name = "client1"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,4 @@ edition = "2021"
 borsh = "1.5.5"
 solana-client = "2.2.3"
 solana-sdk = "2.2.1"
-program = { path = "../program", version = "0.1.0", features = ["no-entrypoint"] }
+program1 = { path = "../program1", version = "0.1.0", features = ["no-entrypoint"] }
